@@ -70,6 +70,7 @@ pub mod keyboard;
 pub mod mouse;
 pub mod physics;
 pub mod sprite;
+pub mod svg_sprite;
 pub mod text;
 
 // Public prelude

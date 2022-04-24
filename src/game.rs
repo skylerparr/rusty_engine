@@ -17,6 +17,8 @@ use std::{
     path::PathBuf,
     time::Duration,
 };
+use bevy::render::view::Msaa;
+use bevy_svg::prelude::Svg2dBundle;
 
 use crate::{
     audio::AudioManager,
@@ -26,6 +28,7 @@ use crate::{
         MouseState, PhysicsPlugin,
     },
     sprite::Sprite,
+    svg_sprite::SvgSprite,
     text::Text,
 };
 
@@ -53,6 +56,9 @@ pub struct Engine {
     /// SYNCED - The state of all sprites this frame. To add a sprite, use the
     /// [`add_sprite`](Engine::add_sprite) method. Modify & remove sprites as you like.
     pub sprites: HashMap<String, Sprite>,
+    /// SYNCED - The state of all sprites this frame. To add a sprite, use the
+    /// [`add_sprite`](Engine::add_svg_sprite) method. Modify & remove sprites as you like.
+    pub svg_sprites: HashMap<String, SvgSprite>,
     /// SYNCED - The state of all texts this frame. For convenience adding a text, use the
     /// [`add_text`](Engine::add_text) method. Modify & remove text as you like.
     pub texts: HashMap<String, Text>,
@@ -128,6 +134,15 @@ impl Engine {
     }
 
     #[must_use]
+    pub fn add_svg_sprite<T: Into<String>, P: Into<PathBuf>>(&mut self, label: T, file_or_preset: P) -> &mut SvgSprite {
+        let label = label.into();
+        self.svg_sprites
+            .insert(label.clone(), SvgSprite::new(label.clone(), file_or_preset));
+        // Unwrap: Can't crash because we just inserted the sprite
+        self.svg_sprites.get_mut(&label).unwrap()
+    }
+
+    #[must_use]
     /// Add a [`Text`]. Use the `&mut Text` that is returned to set the translation, rotation, etc.
     /// Use a unique label for each text. Attempting to add two texts with the same label will
     /// crash.
@@ -153,6 +168,7 @@ impl Engine {
 #[doc(hidden)]
 pub fn setup(mut commands: Commands, asset_server: Res<AssetServer>, mut engine: ResMut<Engine>) {
     add_sprites(&mut commands, &asset_server, &mut engine);
+    add_svg_sprites(&mut commands, &asset_server, &mut engine);
     add_texts(&mut commands, &asset_server, &mut engine);
 }
 
@@ -190,6 +206,23 @@ pub fn add_sprites(commands: &mut Commands, asset_server: &Res<AssetServer>, eng
         let texture_path = PathBuf::from("sprite").join(&sprite.filepath);
         commands.spawn().insert(sprite).insert_bundle(SpriteBundle {
             texture: asset_server.load(texture_path),
+            transform,
+            ..Default::default()
+        });
+    }
+}
+
+// helper function: Add Bevy components for all the sprites in engine.svg_sprites
+#[doc(hidden)]
+pub fn add_svg_sprites(commands: &mut Commands, asset_server: &Res<AssetServer>, engine: &mut Engine) {
+    for (_, svg_sprite) in engine.svg_sprites.drain() {
+        // Create the sprite
+        let transform = svg_sprite.bevy_transform();
+        let texture_path = PathBuf::from("svg").join(&svg_sprite.filepath);
+        let svg = asset_server.load(texture_path);
+        commands.spawn_bundle(OrthographicCameraBundle::new_2d());
+        commands.spawn().insert(svg_sprite).insert_bundle(Svg2dBundle {
+            svg,
             transform,
             ..Default::default()
         });
@@ -294,6 +327,7 @@ impl<S: Send + Sync + 'static> Game<S> {
     pub fn run(&mut self, initial_game_state: S) {
         self.app
             .insert_resource::<WindowDescriptor>(self.window_descriptor.clone())
+            .insert_resource(Msaa { samples: 4 })
             .insert_resource::<S>(initial_game_state);
         self.app
             // Built-ins
@@ -309,6 +343,7 @@ impl<S: Send + Sync + 'static> Game<S> {
             .add_plugin(KeyboardPlugin)
             .add_plugin(MousePlugin)
             .add_plugin(PhysicsPlugin)
+            .add_plugin(bevy_svg::prelude::SvgPlugin)
             //.insert_resource(ReportExecutionOrderAmbiguities) // for debugging
             .add_system(
                 update_window_dimensions
@@ -356,6 +391,7 @@ fn game_logic_sync<S: Send + Sync + 'static>(
         QueryState<(Entity, &mut Sprite, &mut Transform)>,
         QueryState<(Entity, &mut Text, &mut Transform, &mut BevyText)>,
         QueryState<(Entity, &mut DrawMode, &mut Transform, &ColliderLines)>,
+        QueryState<(Entity, &mut SvgSprite, &mut Transform)>,
     )>,
 ) {
     // Update this frame's timing info
@@ -391,6 +427,14 @@ fn game_logic_sync<S: Send + Sync + 'static>(
         let _ = engine
             .sprites
             .insert(sprite.label.clone(), (*sprite).clone());
+    }
+
+    // Copy all svg sprites over to the engine to give to users
+    engine.svg_sprites.clear();
+    for (_, svg_sprite, _) in query_set.q3().iter() {
+        let _ = engine
+            .svg_sprites
+            .insert(svg_sprite.label.clone(), (*svg_sprite).clone());
     }
 
     // Copy all texts over to the engine to give to users
@@ -461,8 +505,19 @@ fn game_logic_sync<S: Send + Sync + 'static>(
         }
     }
 
+    // Transfer any changes in the user's Sprite copies to the Bevy Sprite and Transform components
+    for (entity, mut svg_sprite, mut transform) in query_set.q3().iter_mut() {
+        if let Some(svg_sprite_copy) = engine.svg_sprites.remove(&svg_sprite.label) {
+            *svg_sprite = svg_sprite_copy;
+            *transform = svg_sprite.bevy_transform();
+        } else {
+            commands.entity(entity).despawn();
+        }
+    }
+
     // Add Bevy components for any new sprites remaining in engine.sprites
     add_sprites(&mut commands, &asset_server, &mut engine);
+    add_svg_sprites(&mut commands, &asset_server, &mut engine);
 
     // Transfer any changes in the user's Texts to the Bevy Text and Transform components
     for (entity, mut text, mut transform, mut bevy_text_component) in query_set.q1().iter_mut() {
